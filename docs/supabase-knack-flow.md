@@ -7,6 +7,20 @@ Spec del flujo de **lectura** de Supabase para alimentar las páginas de Knack s
 > - Supabase → Instantly daily push (workflow #2)
 > - Instantly webhook → Supabase replies (workflow #3)
 
+## Estado actual (2026-05-21)
+
+**Workflows desplegados en `https://n8n.simultrayd.com` — todos inactivos hasta completar [Activation checklist](#activation-checklist):**
+
+| # | Workflow | ID | Endpoint |
+|---|---|---|---|
+| A | Auth Login (JWT Issuer) | `t51xq2zgY0np1eQx` | `POST /webhook/auth/login` |
+| B | GET Replies by Trade | `0hvF00Q1bniPu5fl` | `GET /webhook/replies?trade_id=X` |
+| C | GET Inbox (Global) | `kmhDhz3lTowr8LkN` | `GET /webhook/inbox` |
+| D | PATCH Reply Status | `7YL2aZZRz2eZk0TO` | `PATCH /webhook/replies/:id/status` |
+
+**Supabase project:** `pfmnqetthotzpeticfko` · región `us-west-1` · Postgres 17
+**Migration aplicado:** `outreach_initial_schema` (2026-05-20)
+
 ---
 
 ## Tabla de contenidos
@@ -21,6 +35,7 @@ Spec del flujo de **lectura** de Supabase para alimentar las páginas de Knack s
   - [D. PATCH /replies/:id/status — mark read/replied](#d-patch-repliesidstatus--mark-readreplied)
 - [Contrato frontend (Knack custom JS)](#contrato-frontend-knack-custom-js)
 - [Setup / Requisitos](#setup--requisitos)
+- [Activation checklist](#activation-checklist)
 - [Decisiones pendientes](#decisiones-pendientes)
 
 ---
@@ -156,7 +171,7 @@ Esto significa:
 
 Valida credenciales contra Knack y devuelve un JWT firmado por n8n.
 
-**Endpoint:** `POST https://<n8n>/webhook/auth/login`
+**Endpoint:** `POST https://n8n.simultrayd.com/webhook/auth/login`
 
 **Request body:**
 ```json
@@ -190,36 +205,49 @@ Valida credenciales contra Knack y devuelve un JWT firmado por n8n.
 3. **IF** — `{{ $json.session?.user }}` truthy?
    - False → Respond `401`
 
-4. **Code** — emitir JWT
+4. **Code** — emitir JWT (HMAC-SHA256 manual con `crypto` nativo, sin librerías externas)
    ```javascript
-   const jwt = require('jsonwebtoken');
-   const user = $input.first().json.session.user;
+   try {
+     const crypto = require('crypto');
+     const user = $input.first().json.session.user;
 
-   const role = user.profile_keys?.includes('Admin') ? 'Admin'
-              : user.profile_keys?.includes('Staff') ? 'Staff'
-              : 'User';
+     const role = user.profile_keys && user.profile_keys.includes('Admin') ? 'Admin'
+                : user.profile_keys && user.profile_keys.includes('Staff') ? 'Staff'
+                : 'User';
 
-   if (role === 'User') {
-     return [{ json: { error: 'Forbidden' }, statusCode: 403 }];
-   }
-
-   const token = jwt.sign({
-     user_id: user.id,
-     email: user.email,
-     name: user.name,
-     role,
-     exp: Math.floor(Date.now() / 1000) + (8 * 60 * 60)
-   }, $env.JWT_SECRET);
-
-   return [{
-     json: {
-       token,
-       user: { id: user.id, name: user.name, role }
+     if (role === 'User') {
+       return [{ json: { error: 'Forbidden — admin/staff only', statusCode: 403 } }];
      }
-   }];
+
+     function base64url(input) {
+       return Buffer.from(input).toString('base64')
+         .replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+     }
+
+     const header = { alg: 'HS256', typ: 'JWT' };
+     const payload = {
+       user_id: user.id,
+       email: user.email,
+       name: user.name,
+       role,
+       exp: Math.floor(Date.now() / 1000) + (8 * 60 * 60)
+     };
+
+     const headerB64 = base64url(JSON.stringify(header));
+     const payloadB64 = base64url(JSON.stringify(payload));
+     const signingInput = headerB64 + '.' + payloadB64;
+     const signature = crypto.createHmac('sha256', $env.JWT_SECRET)
+       .update(signingInput).digest('base64')
+       .replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+     const token = signingInput + '.' + signature;
+
+     return [{ json: { token, user: { id: user.id, name: user.name, role }, statusCode: 200 } }];
+   } catch (err) {
+     return [{ json: { error: 'Sign JWT failed: ' + err.message, statusCode: 500 } }];
+   }
    ```
 
-5. **Respond to Webhook** — `200` con `{ token, user }`
+5. **Respond to Webhook** — `responseCode: {{$json.statusCode || 200}}`, body `{{$json}}`
 
 ---
 
@@ -227,7 +255,7 @@ Valida credenciales contra Knack y devuelve un JWT firmado por n8n.
 
 Devuelve los replies de un trade específico.
 
-**Endpoint:** `GET https://<n8n>/webhook/replies?trade_id=<id>`
+**Endpoint:** `GET https://n8n.simultrayd.com/webhook/replies?trade_id=<id>`
 
 **Headers:** `Authorization: Bearer <JWT>`
 
@@ -240,30 +268,59 @@ Devuelve los replies de un trade específico.
    - Method: `GET`
    - Response Mode: `Using "Respond to Webhook" Node`
 
-2. **Code** — JWT verify middleware (reutilizable)
+2. **Code** — JWT verify middleware (HMAC-SHA256 manual, reutilizable en C y D)
    ```javascript
-   const jwt = require('jsonwebtoken');
-   const auth = $input.first().json.headers.authorization || '';
-   const token = auth.replace(/^Bearer\s+/i, '');
-
    try {
-     const decoded = jwt.verify(token, $env.JWT_SECRET);
-     if (!['Admin', 'Staff'].includes(decoded.role)) {
-       return [{ json: { error: 'Forbidden' }, statusCode: 403 }];
+     const crypto = require('crypto');
+     const headers = $input.first().json.headers || {};
+     const auth = headers.authorization || headers.Authorization || '';
+     const token = auth.replace(/^Bearer\s+/i, '');
+     const query = $input.first().json.query || {};
+
+     function base64urlDecode(str) {
+       const pad = str.length % 4;
+       if (pad) str += '='.repeat(4 - pad);
+       return Buffer.from(str.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString();
      }
-     return [{
-       json: {
-         ...decoded,
-         trade_id: $input.first().json.query.trade_id
-       }
-     }];
+
+     if (!token) return [{ json: { authorized: false, error: 'Missing token', statusCode: 401 } }];
+
+     const parts = token.split('.');
+     if (parts.length !== 3) return [{ json: { authorized: false, error: 'Invalid token format', statusCode: 401 } }];
+
+     const [headerB64, payloadB64, signature] = parts;
+     const signingInput = headerB64 + '.' + payloadB64;
+     const expected = crypto.createHmac('sha256', $env.JWT_SECRET)
+       .update(signingInput).digest('base64')
+       .replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+
+     if (signature !== expected) return [{ json: { authorized: false, error: 'Invalid signature', statusCode: 401 } }];
+
+     let payload;
+     try { payload = JSON.parse(base64urlDecode(payloadB64)); }
+     catch (err) { return [{ json: { authorized: false, error: 'Invalid payload', statusCode: 401 } }]; }
+
+     if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
+       return [{ json: { authorized: false, error: 'Token expired', statusCode: 401 } }];
+     }
+
+     if (!['Admin', 'Staff'].includes(payload.role)) {
+       return [{ json: { authorized: false, error: 'Forbidden', statusCode: 403 } }];
+     }
+
+     if (!query.trade_id) {
+       return [{ json: { authorized: false, error: 'Missing trade_id query param', statusCode: 400 } }];
+     }
+
+     return [{ json: { authorized: true, user_id: payload.user_id, role: payload.role, trade_id: query.trade_id } }];
    } catch (err) {
-     return [{ json: { error: 'Unauthorized' }, statusCode: 401 }];
+     return [{ json: { authorized: false, error: 'Verify failed: ' + err.message, statusCode: 500 } }];
    }
    ```
 
-3. **IF** — auth válido (`{{ !$json.error }}`)
-   - False → Respond con `statusCode` del Code node
+3. **IF** — `{{ $json.authorized }}` equals `true`
+   - True → Postgres
+   - False → Respond directo con `statusCode` del Code node
 
 4. **Postgres** (Supabase) — Execute Query
    ```sql
@@ -283,9 +340,11 @@ Devuelve los replies de un trade específico.
    ORDER BY received_at DESC
    LIMIT 100;
    ```
-   - Parámetros: `{{ $json.trade_id }}`
+   - Parámetros: `{{ $('Verify JWT').first().json.trade_id }}`
 
-5. **Respond to Webhook** — `200` con `{ replies: [...] }`
+5. **Code "Wrap Replies"** — empaqueta filas en `{ replies, count, statusCode: 200 }`
+
+6. **Respond to Webhook** — `responseCode: {{$json.statusCode || 200}}`, body `{{$json}}`
 
 ---
 
@@ -293,13 +352,17 @@ Devuelve los replies de un trade específico.
 
 Inbox de replies sin leer, todos los trades.
 
-**Endpoint:** `GET https://<n8n>/webhook/inbox`
+**Endpoint:** `GET https://n8n.simultrayd.com/webhook/inbox`
 
 **Headers:** `Authorization: Bearer <JWT>`
 
-**Response (200):** array de replies `status='new'` ordenados por `received_at DESC`.
+**Query params opcionales:**
+- `status` — `new` (default) · `read` · `replied` · `archived`
+- `limit` — default 100, max 500
 
-**Nodos:** idénticos a B, excepto el query del Postgres:
+**Response (200):** array de replies ordenados por `received_at DESC`.
+
+**Nodos:** idénticos a B, excepto el query del Postgres usa el `status` y `limit` recibidos del Verify JWT:
 
 ```sql
 SELECT
@@ -314,10 +377,11 @@ SELECT
   q.company
 FROM public.email_replies r
 LEFT JOIN public.outreach_queue q ON q.id = r.outreach_id
-WHERE r.status = 'new'
+WHERE r.status = $1
 ORDER BY r.received_at DESC
-LIMIT 100;
+LIMIT $2;
 ```
+- Parámetros: `{{ $('Verify JWT').first().json.status_filter }}, {{ $('Verify JWT').first().json.limit }}`
 
 ---
 
@@ -325,7 +389,7 @@ LIMIT 100;
 
 Actualiza el status de un reply (al hacer click "read" / "reply" / "archive" en la UI).
 
-**Endpoint:** `PATCH https://<n8n>/webhook/replies/:id/status`
+**Endpoint:** `PATCH https://n8n.simultrayd.com/webhook/replies/:id/status`
 
 **Headers:** `Authorization: Bearer <JWT>`
 
@@ -346,9 +410,12 @@ Actualiza el status de un reply (al hacer click "read" / "reply" / "archive" en 
    - Method: `PATCH`
    - Response Mode: `Using "Respond to Webhook" Node`
 
-2. **Code** — JWT verify (mismo middleware de B)
+2. **Code "Verify JWT"** — mismo middleware de B + extrae `params.id` y `body.status`. Valida:
+   - JWT firma + exp + rol Admin/Staff
+   - `id` con regex UUID
+   - `status` en whitelist `['new','read','replied','archived']`
 
-3. **IF** — auth válido
+3. **IF** — `{{ $json.authorized }}` equals `true`
 
 4. **Postgres** — Update
    ```sql
@@ -357,9 +424,11 @@ Actualiza el status de un reply (al hacer click "read" / "reply" / "archive" en 
    WHERE id = $2
    RETURNING id, status, updated_at;
    ```
-   - Parámetros: `{{ $json.body.status }}`, `{{ $json.params.id }}`
+   - Parámetros: `{{ $('Verify JWT').first().json.new_status }}, {{ $('Verify JWT').first().json.reply_id }}`
 
-5. **Respond to Webhook** — `200` con la row actualizada
+5. **Code "Wrap Result"** — devuelve 404 si Postgres no encontró la row; sino la row con `statusCode: 200`
+
+6. **Respond to Webhook** — `responseCode: {{$json.statusCode || 200}}`, body `{{$json}}`
 
 ---
 
@@ -423,12 +492,27 @@ await n8nFetch(`/replies/${replyId}/status`, {
 
 ### 1. Variables de entorno en n8n
 
+Edita el `.env` (o `docker-compose.yml`) del host de n8n y agrega:
+
 ```bash
-JWT_SECRET=<random 64-char string>          # firma de JWTs
+JWT_SECRET=<64-char base64 string>          # firma de JWTs
 KNACK_APP_ID=<knack_application_id>         # para llamadas a /session
 ```
 
-> Generar `JWT_SECRET`: `openssl rand -base64 48` o equivalente. **Guardar offline**.
+**Generar `JWT_SECRET` en PowerShell** (Windows 5.1 compatible):
+```powershell
+$bytes = New-Object byte[] 48
+(New-Object System.Security.Cryptography.RNGCryptoServiceProvider).GetBytes($bytes)
+[Convert]::ToBase64String($bytes)
+```
+
+**O en bash:** `openssl rand -base64 48`
+
+> **Guarda el secret en password manager**. Si se pierde, todos los JWTs emitidos se invalidan al regenerarlo (managers tendrán que volver a loguearse).
+
+**`KNACK_APP_ID`:** Knack Builder → Settings → API & Code → Application ID.
+
+Después de editar las env vars: **reiniciar n8n** para que las lea.
 
 ### 2. Credencial Postgres → Supabase en n8n
 
@@ -446,10 +530,10 @@ KNACK_APP_ID=<knack_application_id>         # para llamadas a /session
 ### 3. URLs de los webhooks en producción
 
 ```
-POST   https://<n8n>/webhook/auth/login
-GET    https://<n8n>/webhook/replies?trade_id=<id>
-GET    https://<n8n>/webhook/inbox
-PATCH  https://<n8n>/webhook/replies/<id>/status
+POST   https://n8n.simultrayd.com/webhook/auth/login
+GET    https://n8n.simultrayd.com/webhook/replies?trade_id=<id>
+GET    https://n8n.simultrayd.com/webhook/inbox[?status=new&limit=100]
+PATCH  https://n8n.simultrayd.com/webhook/replies/<id>/status
 ```
 
 ### 4. CORS
@@ -461,18 +545,42 @@ Configurar n8n para permitir el dominio de Knack en CORS. Si self-hosted, en `~/
 
 ---
 
+## Activation checklist
+
+Pasos en orden para pasar de "creado e inactivo" → "operativo en producción":
+
+- [ ] **Env vars en n8n** (`.env` + restart)
+  - `JWT_SECRET` generado y guardado offline
+  - `KNACK_APP_ID` obtenido de Knack Builder
+- [ ] **Credencial Postgres "Supabase Outreach"** creada en n8n UI (Transaction Pooler, puerto 6543)
+- [ ] **Asignar credencial Postgres** a los 3 nodos Postgres:
+  - Workflow B → `Postgres - Get Replies`
+  - Workflow C → `Postgres - Get Inbox`
+  - Workflow D → `Postgres - Update Status`
+- [ ] **CORS** configurado en el reverse proxy de `n8n.simultrayd.com` (permitir origen `*.knack.com`)
+- [ ] **Activate** los 4 workflows (toggle arriba a la derecha en cada uno)
+- [ ] **Smoke test login** con curl:
+  ```bash
+  curl -X POST https://n8n.simultrayd.com/webhook/auth/login \
+    -H "Content-Type: application/json" \
+    -d "{\"email\":\"admin@simultrayd.com\",\"password\":\"...\"}"
+  ```
+  Debe devolver `{ "token": "eyJ...", "user": {...}, "statusCode": 200 }`. Si devuelve 403 cuando debería ser 200 → ver siguiente checkbox.
+- [ ] **Verificar `profile_keys` de Knack** — el código del Workflow A asume `user.profile_keys = ['Admin', 'Staff', ...]`. Si el field se llama distinto, ajustar el `Sign JWT` Code node con el field real.
+
+---
+
 ## Decisiones pendientes
 
-- [ ] **Dominio n8n público** — ¿`n8n.simultrayd.com`? Necesario para construir las URLs finales
-- [ ] **JWT_SECRET** — generar y guardar
 - [ ] **Refresh token** — skip por ahora (8h JWT suficiente). Si los managers necesitan SSO de 30d, agregar workflow `/auth/refresh` con tabla `refresh_tokens` en Supabase
-- [ ] **Field de rol en Knack User** — confirmar `profile_keys` vs un field específico. Si tienen field custom, ajustar el Code node del workflow A
-- [ ] **Knack login integration** — definir si interceptamos el form actual o pegamos un botón "Sign in" separado para n8n
+- [ ] **Knack login integration UX** — definir si interceptamos el form de login actual (custom JS intercept) o pegamos un botón "Sign in" separado para n8n
 
 ---
 
 ## Referencias
 
-- Supabase project: `pfmnqetthotzpeticfko` (SimulTrayd)
-- n8n nodes usados: Webhook, HTTP Request, IF, Code, Postgres, Respond to Webhook
+- Supabase project: `pfmnqetthotzpeticfko` (SimulTrayd) · region `us-west-1` · Postgres 17
+- n8n host: `https://n8n.simultrayd.com`
+- n8n nodes usados: Webhook, HTTP Request, IF, Code, Postgres, Set, Respond to Webhook
 - Migration aplicado: `outreach_initial_schema` (2026-05-20)
+- JWT spec: HS256 firmado con `crypto.createHmac` nativo (sin librerías externas), payload `{user_id, email, name, role, exp}`, lifetime 8h
