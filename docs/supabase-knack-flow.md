@@ -13,10 +13,13 @@ Spec del flujo de **lectura** de Supabase para alimentar las páginas de Knack s
 
 | # | Workflow | ID | Endpoint |
 |---|---|---|---|
-| A | Auth Login (JWT Issuer) | `t51xq2zgY0np1eQx` | `POST /webhook/auth/login` |
+| A | Auth Login (JWT issuer, email+password) | `t51xq2zgY0np1eQx` | `POST /webhook/auth/login` |
+| **A2** | **Auth Exchange (Knack token → JWT)** ← prod path | `SC2iFF8nnECCIWQH` | `POST /webhook/auth/exchange` |
 | B | GET Replies by Trade | `0hvF00Q1bniPu5fl` | `GET /webhook/replies?trade_id=X` |
 | C | GET Inbox (Global) | `kmhDhz3lTowr8LkN` | `GET /webhook/inbox` |
 | D | PATCH Reply Status | `7YL2aZZRz2eZk0TO` | `PATCH /webhook/replies/:id/status` |
+
+**Frontend code:** Trade-Platform monolito `knack/Simultrayd_NextGen.js` → PARTE 5 (sección `SimulTraydOutreach`). Pegar al Knack Builder JS settings — ver [[feedback_knack_monolith_paste_deploy]] en memory.
 
 **Supabase project:** `pfmnqetthotzpeticfko` · región `us-west-1` · Postgres 17
 **Migration aplicado:** `outreach_initial_schema` (2026-05-20)
@@ -558,15 +561,19 @@ Pasos en orden para pasar de "creado e inactivo" → "operativo en producción":
   - Workflow C → `Postgres - Get Inbox`
   - Workflow D → `Postgres - Update Status`
 - [ ] **CORS** configurado en el reverse proxy de `n8n.simultrayd.com` (permitir origen `*.knack.com`)
-- [ ] **Activate** los 4 workflows (toggle arriba a la derecha en cada uno)
-- [ ] **Smoke test login** con curl:
-  ```bash
-  curl -X POST https://n8n.simultrayd.com/webhook/auth/login \
-    -H "Content-Type: application/json" \
-    -d "{\"email\":\"admin@simultrayd.com\",\"password\":\"...\"}"
+- [ ] **Activate los 5 workflows** (toggle arriba a la derecha en cada uno): A, A2, B, C, D
+- [ ] **Crear scenes en Knack:**
+  - Nueva página admin-only para el inbox global → guardar `scene_id` y reemplazar `scene_TBD_INBOX` en el monolito
+  - Identificar el scene_id del Trade detail page existente → reemplazar `scene_TBD_TRADE`
+- [ ] **Insertar containers HTML en las páginas Knack:**
+  - En el inbox scene: `<div id="styd-outreach-inbox"></div>`
+  - En el trade detail scene: `<div id="styd-outreach-trade-replies"></div>`
+- [ ] **Bumpear `SimulTrayd_Version`** (ya hecho: `6.6.0-outreach-inbox-2026-05-21`) y pegar monolito al Knack Builder
+- [ ] **Smoke test exchange** desde browser console estando logueado como Admin:
+  ```js
+  window._stydOutreach.exchangeToken(await Knack.getUser());
   ```
-  Debe devolver `{ "token": "eyJ...", "user": {...}, "statusCode": 200 }`. Si devuelve 403 cuando debería ser 200 → ver siguiente checkbox.
-- [ ] **Verificar `profile_keys` de Knack** — el código del Workflow A asume `user.profile_keys = ['Admin', 'Staff', ...]`. Si el field se llama distinto, ajustar el `Sign JWT` Code node con el field real.
+  Debe loguear "n8n JWT issued for <name>" y guardar el token en `localStorage.styd_n8n_token`.
 
 ---
 
