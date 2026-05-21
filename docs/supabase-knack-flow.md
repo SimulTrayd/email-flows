@@ -19,7 +19,7 @@ Spec del flujo de **lectura** de Supabase para alimentar las páginas de Knack s
 | C | GET Inbox (Global) | `kmhDhz3lTowr8LkN` | `GET /webhook/inbox` |
 | D | PATCH Reply Status | `7YL2aZZRz2eZk0TO` | `PATCH /webhook/replies/:id/status` |
 
-**Frontend code:** Trade-Platform monolito `knack/Simultrayd_NextGen.js` → PARTE 5 (sección `SimulTraydOutreach`). Pegar al Knack Builder JS settings — ver [[feedback_knack_monolith_paste_deploy]] en memory.
+**Frontend code:** Trade-Platform monolito `knack/Simultrayd_NextGen.js` → PARTE 5 (sección `SimulTraydOutreach`). Spec detallado en [`knack-outreach-frontend.md`](./knack-outreach-frontend.md). Deploy = paste al Knack Builder — ver [[feedback_knack_monolith_paste_deploy]] en memory.
 
 **Supabase project:** `pfmnqetthotzpeticfko` · región `us-west-1` · Postgres 17
 **Migration aplicado:** `outreach_initial_schema` (2026-05-20)
