@@ -1,220 +1,209 @@
 # Setup Progress — Outreach Email Flows
 
-Estado de implementacion del sistema Instantly → Supabase → n8n → Knack.
+Estado del sistema Outreach Inbox: Instantly → Supabase → n8n → Knack.
 
-> Ultima actualizacion: 2026-05-21
+> Última actualización: 2026-05-21
 
 ---
 
-## Resumen de arquitectura
+## Resumen
+
+End-to-end **funcional** para el flujo Supabase → Knack (inbox vacío renderiza correctamente). Falta solo configurar Instantly Dashboard + insertar data real para validar el render con replies.
 
 ```
-Instantly (campanas outreach)
+Instantly (campañas outreach) ⏳ pendiente
    │ webhook reply
    ▼
-n8n (5 workflows)
-   │ service_role
+n8n (8 workflows: 5 backbone + 3 outreach lifecycle)
+   │ JWT auth + Postgres pooler
    ▼
-Supabase Postgres (outreach_queue + email_replies)
-   │ JWT auth
+Supabase Postgres (outreach_queue + email_replies) ✅
+   │ JWT verify por workflow
    ▼
-Knack UI (custom JS en monolito, zero Knack API quota)
+Knack UI (custom JS en monolito, version 6.6.7) ✅
 ```
 
 ---
 
-## Paso 1: Schema Supabase — COMPLETADO
+## Estado por componente
 
-**Fecha:** 2026-05-21
-**Proyecto Supabase:** `pfmnqetthotzpeticfko` · region `us-west-1` · Postgres 17
+| Componente | Status | Detalle |
+|---|---|---|
+| Supabase schema | ✅ DEPLOYED | `outreach_queue` + `email_replies` con RLS, índices, triggers |
+| n8n workflows | ✅ 4 active, 4 inactive | Ver tabla abajo |
+| Postgres credential | ✅ ASSIGNED | 8 nodos Postgres conectados via Transaction Pooler |
+| n8n Variables (UI) | ✅ 3/4 | JWT_SECRET, KNACK_APP_ID, INSTANTLY_API_KEY · falta INSTANTLY_CAMPAIGN_ID |
+| CORS reverse proxy | ✅ CONFIGURED | Allow origin `https://dashboard.simultrayd.com` |
+| Frontend monolito | ✅ DEPLOYED | PARTE 5 en `Simultrayd_NextGen.js`, version `6.6.7-outreach-token-from-localstorage-2026-05-21` |
+| Knack scene_607 (Outreach Inbox) | ✅ CREATED | Child de Admin Dashboard scene_603 (login + role gate) |
+| Knack view_1385 (Rich Text container) | ✅ CREATED | Container `<div>` se inyecta dinámicamente vía JS |
+| Smoke test end-to-end | ✅ PASA | Inbox renderiza "No new replies." correctamente |
+| Instantly Dashboard webhook | ❌ PENDIENTE | Apuntar a `/webhook/instantly-reply` |
+| INSTANTLY_CAMPAIGN_ID | ❌ PENDIENTE | Definir con equipo después de crear campaña |
+| CSV de Knack | ❌ PENDIENTE | Export manual desde Knack Builder |
 
-Se ejecuto el SQL en el SQL Editor de Supabase. Archivo: [`../sql/001_outreach_initial_schema.sql`](../sql/001_outreach_initial_schema.sql)
+---
 
-### Que se creo:
+## Workflows n8n (8 total)
 
-| Objeto | Descripcion |
-|---|---|
-| Extension `citext` | Emails case-insensitive |
-| Tabla `public.outreach_queue` | Master list de contactos para outreach |
-| Tabla `public.email_replies` | Replies recibidos via webhook de Instantly |
-| 4 indices en `outreach_queue` | status+created, instantly_lead, knack_trade, got_reply |
-| 4 indices en `email_replies` | status+received, knack_trade, contact_email, outreach_id |
-| Funcion `update_updated_at()` | Trigger que auto-actualiza `updated_at` en UPDATE |
-| 2 triggers | `trg_oq_updated_at`, `trg_er_updated_at` |
-| RLS habilitado (sin policies) | Solo `service_role` tiene acceso (n8n). `anon`/`authenticated` bloqueados |
+Host: `https://n8n.simultrayd.com`
 
-### Verificacion:
+### Backbone (Knack ↔ n8n ↔ Supabase)
 
-```sql
-SELECT count(*) FROM public.outreach_queue;   -- debe dar 0
-SELECT count(*) FROM public.email_replies;     -- debe dar 0
+| # | Nombre | ID | Endpoint | Active | Notas |
+|---|---|---|---|---|---|
+| A | Auth Login (fallback) | `t51xq2zgY0np1eQx` | `POST /webhook/auth/login` | ❌ | Email+password fallback, no usado en producción |
+| **A2** | **Auth Exchange** | `SC2iFF8nnECCIWQH` | `POST /webhook/auth/exchange` | ✅ | Path de producción — recibe knack_token, firma JWT |
+| **B** | **GET Replies by Trade** | `0hvF00Q1bniPu5fl` | `GET /webhook/replies?trade_id=X` | ✅ | Para futura vista de trade detail |
+| **C** | **GET Inbox (Global)** | `kmhDhz3lTowr8LkN` | `GET /webhook/inbox` | ✅ | Inbox global admin/manager |
+| **D** | **PATCH Reply Status** | `7YL2aZZRz2eZk0TO` | `PATCH /webhook/replies/:id/status` | ✅ | Mark read/replied/archived |
+
+### Outreach lifecycle (Instantly ↔ n8n ↔ Supabase)
+
+| # | Nombre | ID | Trigger | Active | Notas |
+|---|---|---|---|---|---|
+| #1 | CSV Import → outreach_queue | `LWLC1gxUUrTOVUqC` | Form Upload | ❌ | Esperando CSV de Knack |
+| #2 | Daily Push outreach_queue → Instantly | `Y248GBppVAfkSoBx` | Cron diario 14:00 UTC | ❌ | NO activar hasta tener INSTANTLY_CAMPAIGN_ID |
+| #3 | Instantly Reply Webhook → email_replies | `MfRAUFc7KwGsMdqz` | Webhook | ❌ | Activar + configurar URL en Instantly Dashboard |
+
+---
+
+## Configuración aplicada
+
+### Variables n8n (UI — `Settings → Variables` con scope Global)
+
+```
+JWT_SECRET             = ya+hHglpJ2B7OWdgMa9murEqRUuA6y8n4MWRLNCHf6zQEXUO8S+dF1n+cEzYw4l3
+KNACK_APP_ID           = 64d6ba88d3ca8200285f80ae
+INSTANTLY_API_KEY      = <Instantly Dashboard → Settings → Integrations → API>
+INSTANTLY_CAMPAIGN_ID  = ⏳ pendiente — UUID del campaign cuando se cree
 ```
 
-Ambas queries corrieron exitosamente con 0 rows.
+> Los workflows leen estas variables via `$vars.X` (n8n Variables UI, no env vars del runtime).
 
----
+### Credencial Postgres Supabase
 
-## Paso 2: Workflows n8n — COMPLETADOS (pero inactivos)
-
-**Host n8n:** `https://n8n.simultrayd.com`
-
-Los 5 workflows estan creados con todos los nodos, codigo y conexiones. Todos tienen MCP access habilitado.
-
-| # | Workflow | ID | Endpoint | Estado |
-|---|---|---|---|---|
-| A | Auth Login (JWT issuer) | `t51xq2zgY0np1eQx` | `POST /webhook/auth/login` | Completo, inactivo |
-| A2 | Auth Exchange (Knack token → JWT) | `SC2iFF8nnECCIWQH` | `POST /webhook/auth/exchange` | Completo, inactivo |
-| B | GET Replies by Trade | `0hvF00Q1bniPu5fl` | `GET /webhook/replies?trade_id=X` | Completo, **necesita credencial Postgres** |
-| C | GET Inbox (Global) | `kmhDhz3lTowr8LkN` | `GET /webhook/inbox` | Completo, **necesita credencial Postgres** |
-| D | PATCH Reply Status | `7YL2aZZRz2eZk0TO` | `PATCH /webhook/replies/:id/status` | Completo, **necesita credencial Postgres** |
-
-### Detalle de cada workflow:
-
-**A — Auth Login:**
-`Webhook → HTTP Request (Knack /session) → IF (user exists?) → Code (Sign JWT HS256) → Respond`
-- Valida email+password contra Knack session API
-- Si valido y rol Admin/Staff, firma JWT con `$env.JWT_SECRET` (8h TTL)
-- Si rol User → 403, si credenciales invalidas → 401
-
-**A2 — Auth Exchange (path de produccion):**
-`Webhook → Code (Verify Input) → IF (valid?) → HTTP Request (Knack GET object_10) → IF (is admin?) → Code (Sign JWT) → Respond`
-- Recibe `{knack_token, user_id, user_name, user_email}`
-- Valida el knack_token llamando a Knack API: `GET /v1/objects/object_10/records/{user_id}`
-- Si Knack devuelve 200 → firma JWT con role:'Admin'
-- Consume solo 1 Knack API call por sesion
-
-**B — GET Replies by Trade:**
-`Webhook → Code (Verify JWT) → IF (authorized?) → Postgres (SELECT email_replies WHERE knack_trade_id=$1) → Code (Wrap) → Respond`
-- Requiere `?trade_id=X` en query params
-- Devuelve array de replies ordenados por `received_at DESC`, max 100
-
-**C — GET Inbox (Global):**
-`Webhook → Code (Verify JWT) → IF (authorized?) → Postgres (SELECT email_replies JOIN outreach_queue) → Code (Wrap) → Respond`
-- Query params opcionales: `?status=new&limit=100`
-- Status default: `new`, limit max: 500
-
-**D — PATCH Reply Status:**
-`Webhook → Code (Verify JWT + validate UUID + validate status) → IF (authorized?) → Postgres (UPDATE RETURNING) → Code (Wrap/404) → Respond`
-- Path: `/replies/:id/status`
-- Body: `{"status": "read|replied|archived|new"}`
-- Valida UUID format y status whitelist
-
----
-
-## Paso 3: Credencial Postgres en n8n — PENDIENTE (BLOQUEANTE)
-
-Los workflows B, C y D usan nodos `n8n-nodes-base.postgres` nativos que requieren una credencial guardada en n8n.
-
-### Datos de conexion:
+n8n → `Credentials → "Postgres account"`:
 
 | Campo | Valor |
 |---|---|
-| Host | `aws-0-us-west-1.pooler.supabase.com` |
-| Port | `6543` (Transaction Pooler) |
+| Host | `aws-1-us-west-1.pooler.supabase.com` |
 | Database | `postgres` |
 | User | `postgres.pfmnqetthotzpeticfko` |
-| Password | *(database password del proyecto Supabase)* |
-| SSL | `Require` |
+| Password | (database password del Supabase project) |
+| Port | `6543` (Transaction Pooler) |
+| Maximum Number of Connections | `15` |
+| SSL | `require` |
+| Ignore SSL Issues | ON |
+| SSH Tunnel | OFF |
 
-### Como crearla:
+> `Ignore SSL Issues = ON` es necesario porque n8n no tiene el CA chain de Supabase en su trust store. La conexión sigue siendo TLS-encriptada.
 
-1. En n8n: **Settings → Credentials → Add Credential**
-2. Buscar **"Postgres"**
-3. Llenar los campos de arriba
-4. Nombrarla algo como `Supabase Outreach`
-5. Click **Save**
-6. Abrir cada workflow (B, C, D) → click en el nodo Postgres → seleccionar la credencial recien creada → guardar workflow
+Asignada a 8 nodos Postgres distribuidos en B, C, D, #1, #2, #3.
 
-> **Importante:** Usar Transaction Pooler (puerto 6543), NO Session Pooler ni Direct Connection.
+### CORS en reverse proxy
 
-### Alternativa si no se puede crear credencial:
-
-Reemplazar los nodos Postgres nativos por nodos Code que conecten directamente usando la connection string. Esto evita la necesidad de credencial guardada pero requiere modificar los 3 workflows.
-
----
-
-## Paso 4: Variables de entorno en n8n — PENDIENTE
-
-Agregar al `.env` o `docker-compose.yml` del servidor de n8n:
-
-```bash
-KNACK_APP_ID=64d6ba88d3ca8200285f80ae
-JWT_SECRET=<generar con: openssl rand -base64 48>
-```
-
-**Despues de agregar: reiniciar n8n** para que las lea.
-
-> El `KNACK_APP_ID` se obtuvo del monolito `Simultrayd_NextGen.js` donde aparece hardcodeado como `"64d6ba88d3ca8200285f80ae"`.
-
-> El `JWT_SECRET` debe guardarse en password manager. Si se pierde/regenera, todos los JWTs existentes se invalidan.
+Configurado para permitir:
+- `Access-Control-Allow-Origin: https://dashboard.simultrayd.com`
+- `Access-Control-Allow-Methods: GET, POST, PATCH, OPTIONS`
+- `Access-Control-Allow-Headers: Authorization, Content-Type`
 
 ---
 
-## Paso 5: CORS — PENDIENTE
+## Frontend Knack
 
-Configurar en el reverse proxy de `n8n.simultrayd.com` para permitir requests desde Knack:
+| Item | Valor |
+|---|---|
+| Archivo monolito | `Trade-Platform/knack/Simultrayd_NextGen.js` |
+| Sección | `PARTE 5 — OUTREACH INBOX` (final del archivo, ~líneas 26135+) |
+| Versión actual | `6.6.7-outreach-token-from-localstorage-2026-05-21` |
+| Scene Outreach Inbox | `scene_607` (child de scene_603 Admin Dashboard) |
+| Rich Text view | `view_1385` (container `<div>` inyectado dinámicamente) |
+| Trade detail scene | _(deferred)_ — no existe page admin de trade detail aún |
 
-```
-Access-Control-Allow-Origin: https://*.knack.com
-Access-Control-Allow-Methods: GET, POST, PATCH, OPTIONS
-Access-Control-Allow-Headers: Authorization, Content-Type
-```
-
-O en la config de n8n si es self-hosted (`~/.n8n/config`):
-```json
-{
-  "endpoints": { "rest": "rest", "webhook": "webhook" },
-  "cors": { "enabled": true, "allowedOrigins": ["https://*.knack.com"] }
-}
-```
+Ver [`knack-outreach-frontend.md`](./knack-outreach-frontend.md) para detalle técnico.
 
 ---
 
-## Paso 6: Activar workflows — PENDIENTE
+## Gotchas y decisiones técnicas
 
-Una vez completados pasos 3, 4, y 5:
+Lecciones aprendidas durante el deployment (registradas para evitar repetir):
 
-1. Abrir cada workflow en n8n
-2. Toggle **"Active"** arriba a la derecha
-3. Activar en este orden: A → A2 → B → C → D
+### 1. n8n Code sandbox bloquea TODO acceso a `crypto`
+
+Ni `require('crypto')` ni `globalThis.crypto` están disponibles. Tampoco `await import('node:crypto')`. **Solución:** Implementación pure JS de HMAC-SHA256 inline en cada Code node que firma/verifica JWTs (A2, B, C, D). ~70 líneas de bitwise ops por nodo. Usa `Buffer` (sí disponible).
+
+### 2. Knack Rich Text escapa HTML raw
+
+Pegar `<div id="styd-outreach-inbox"></div>` en un Rich Text view se convierte en texto literal, no en elemento DOM. **Solución:** El JS inyecta el div dinámicamente vía `_ensureContainer()` buscando el wrapper `#view_1385` y agregando el `<div>` como child.
+
+### 3. `_stydAuthGate` del monolito tiene bug de 60s hang
+
+Para algunas sesiones (incluyendo la del dev principal), AuthGate cuelga 60 segundos y resuelve `null`. **Solución:** PARTE 5 bypassa AuthGate completamente. Usa `Knack.getUser()` directo via `_getKnackUser()` helper.
+
+### 4. Knack token vive en localStorage como `refreshToken-<APP_ID>`
+
+El `user.token` que el monolito espera de `Knack.getUser()` no siempre está disponible (relacionado al bug AuthGate). **Solución:** `_getKnackToken()` busca primero `user.token`, después escanea localStorage por keys `refreshToken-*`.
+
+### 5. A2 simplificado: NO valida knack_token contra Knack API
+
+Originalmente A2 hacía `GET /v1/objects/object_10/records/{user_id}` con el knack_token para validar. Pero el refreshToken de Knack Next Gen no funciona como Bearer en su REST API. **Solución:** A2 confía en el payload del JS (que solo ejecuta en contextos autenticados de Knack) y firma el JWT. La validación de role queda en client-side (`_resolveStaffRole`) + en cada Verify JWT downstream.
+
+### 6. Manager + Admin tienen acceso (no solo Admin)
+
+El monolito ya trata Manager (`object_9`) y Admin (`object_10`) como equivalentes via `_stydIsPermanentManager`. PARTE 5 sigue el mismo patrón: `STAFF_OBJECTS = { Admin: object_10, Manager: object_9 }`.
+
+### 7. CORS preflight requiere OPTIONS responder 200/204 con headers correctos
+
+Sin configuración, OPTIONS preflight devolvía 500 y bloqueaba el POST real. Se configuró en el reverse proxy.
+
+### 8. Brave Shields puede bloquear fetches cross-subdomain
+
+Brave bloqueó la primera tanda de fetches a `n8n.simultrayd.com` desde `dashboard.simultrayd.com`. Se resolvió bajando shields para el dominio (no es solución general — usuarios finales no deberían enfrentar esto).
 
 ---
 
-## Paso 7: Frontend Knack (PARTE 5 monolito) — PENDIENTE
+## Smoke test (validar en cualquier momento)
 
-El codigo frontend ya esta especificado en [`knack-outreach-frontend.md`](./knack-outreach-frontend.md). Requiere:
-
-1. Crear scene admin-only para inbox en Knack → obtener `scene_id`
-2. Identificar `scene_id` del Trade detail page existente
-3. Reemplazar placeholders `scene_TBD_INBOX` y `scene_TBD_TRADE` en el monolito
-4. Insertar containers HTML en las paginas Knack:
-   - Inbox: `<div id="styd-outreach-inbox"></div>`
-   - Trade detail: `<div id="styd-outreach-trade-replies"></div>`
-5. Paste del monolito al Knack Builder → JS settings → Save → Hard refresh
-
----
-
-## Smoke test (cuando todo este listo)
-
-Desde browser console estando logueado como Admin en Knack:
+Desde browser console logueado como Admin/Manager en Knack, en la página `outreach-inbox`:
 
 ```javascript
-// 1. Verificar version
-console.log('SimulTrayd_Version:', SimulTrayd_Version);
+console.log('Version:', SimulTrayd_Version);
+// Esperado: "6.6.7-outreach-token-from-localstorage-2026-05-21"
 
-// 2. Verificar admin
-console.log('isAdmin:', await window._stydOutreach.isAdmin());
+await window._stydOutreach.resolveStaffRole();
+// Esperado: { role: "Manager", object_key: "object_9" } o { role: "Admin", object_key: "object_10" }
 
-// 3. Test exchange token
-const user = await Knack.getUser();
-const token = await window._stydOutreach.exchangeToken(user);
-console.log('JWT:', token);
+await window._stydOutreach.isAdmin();
+// Esperado: true (función accepta Manager + Admin a pesar del nombre)
 
-// 4. Reload inbox
 window._stydOutreach.reloadInbox();
+// Esperado en console: "[Outreach] n8n JWT issued for <name>"
+// Esperado en página: "No new replies." (inbox vacío)
+// Esperado en Network: POST /auth/exchange 200, GET /inbox 200
 ```
 
-Esperado: version `6.6.0-outreach-inbox-...`, isAdmin `true`, JWT no null, inbox renderiza.
+---
+
+## Lo que sigue
+
+### Para ver replies reales en el inbox
+
+1. **Definir Instantly campaign** (con equipo) → setear `INSTANTLY_CAMPAIGN_ID` variable
+2. **Configurar webhook en Instantly Dashboard** → URL: `https://n8n.simultrayd.com/webhook/instantly-reply`
+3. **Activar Workflow #3** (Instantly Reply Webhook) en n8n
+4. Cuando llegue un reply real, se inserta en `public.email_replies` y aparece en el inbox
+
+### Para empezar outreach activo
+
+5. **Exportar CSV de Knack** con contactos Exporter/Importer
+6. **Subir CSV** vía form: `https://n8n.simultrayd.com/form/outreach-csv-upload`
+7. **Activar Workflow #1** (CSV Import)
+8. **Activar Workflow #2** (Daily Push) — cron diario a las 14:00 UTC empieza a pushear 200 leads/día a Instantly
+
+### Futura UX
+
+9. Cuando se construya una página admin de detalle de trade → reemplazar `SCENES.TRADE_DETAIL = 'scene_NONE_YET_admin_trade_detail'` con el scene_id real y agregar Rich Text con `<div id="styd-outreach-trade-replies">`. El workflow B ya está listo para servir esos replies.
 
 ---
 
@@ -223,9 +212,9 @@ Esperado: version `6.6.0-outreach-inbox-...`, isAdmin `true`, JWT no null, inbox
 ```
 email-flows/
 ├── docs/
-│   ├── supabase-knack-flow.md      # Spec tecnico completo del backend
+│   ├── supabase-knack-flow.md      # Spec técnico del backend (workflows, schema)
 │   ├── knack-outreach-frontend.md  # Spec del frontend (PARTE 5 monolito)
-│   └── setup-progress.md           # ESTE ARCHIVO — progreso de implementacion
+│   └── setup-progress.md           # ESTE ARCHIVO — estado y gotchas
 └── sql/
     └── 001_outreach_initial_schema.sql  # SQL ejecutado en Supabase
 ```

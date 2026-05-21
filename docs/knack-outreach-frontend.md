@@ -2,21 +2,21 @@
 
 Integración frontend del módulo de Outreach Inbox en la app de Knack. Renderiza replies de email (servidas por n8n → Supabase) **sin consumir Knack API quota**.
 
-> Doc complementario al backend spec: [`supabase-knack-flow.md`](./supabase-knack-flow.md)
+> Doc complementario al backend spec: [`supabase-knack-flow.md`](./supabase-knack-flow.md) · Estado actual del sistema: [`setup-progress.md`](./setup-progress.md)
 
 ---
 
 ## Tabla de contenidos
 
 - [Dónde vive el código](#dónde-vive-el-código)
-- [Por qué en el monolito y no como módulo separado](#por-qué-en-el-monolito-y-no-como-módulo-separado)
+- [Estado actual](#estado-actual)
 - [Arquitectura del flow](#arquitectura-del-flow)
 - [API pública (`window._stydOutreach`)](#api-pública-window_stydoutreach)
 - [DOM contract](#dom-contract)
 - [Auth flow paso a paso](#auth-flow-paso-a-paso)
 - [Robustness features](#robustness-features)
 - [Cómo debuggear](#cómo-debuggear)
-- [Activation checklist](#activation-checklist)
+- [Lessons learned](#lessons-learned)
 
 ---
 
@@ -28,51 +28,62 @@ Integración frontend del módulo de Outreach Inbox en la app de Knack. Renderiz
 | Archivo | `knack/Simultrayd_NextGen.js` |
 | Sección | `PARTE 5 — OUTREACH INBOX` (al final del archivo) |
 | Línea inicial | ~26135 |
-| Versión | `6.6.1-outreach-inbox-view1385-2026-05-21` |
+| Versión actual | `6.6.7-outreach-token-from-localstorage-2026-05-21` |
 | Deploy | Paste manual al Knack Builder JS settings + hard refresh |
 
 ---
 
-## Por qué en el monolito y no como módulo separado
+## Estado actual
 
-El `CLAUDE.md` del repo describe un sistema modular con loader.js + jsDelivr CDN. **Pero ese sistema no existe en el checkout actual**: `knack/modules/` solo tiene 3 archivos (Classic, support-chat, knack.css), no hay loader ni configuración. El deploy real es copy/paste del monolito completo al Knack Builder.
+✅ **Desplegado y operativo** — smoke test pasa (`POST /auth/exchange` → 200, `GET /inbox` → 200, render "No new replies.").
 
-Por eso PARTE 5 sigue la misma convención que PARTE 1-4: bloque IIFE al final del archivo, namespace `_styd*`, integración con helpers globales existentes (`_stydAuthGate`, `_stydOnAuthed`, `_stydMyRole`).
+| Item | Status |
+|---|---|
+| Scene Outreach Inbox | `scene_607` (child de Admin Dashboard `scene_603`) |
+| Rich Text view del inbox | `view_1385` — container `<div>` se inyecta dinámicamente |
+| Versión deployed | `6.6.7-outreach-token-from-localstorage-2026-05-21` |
+| Trade detail UI | _(deferred)_ — no existe page admin de trade detail aún |
+
+Para detalle por componente ver [`setup-progress.md`](./setup-progress.md).
 
 ---
 
 ## Arquitectura del flow
 
 ```
-Knack page render (con <div id="styd-outreach-..."></div>)
-   │ view:render:view_X event (inbox) / page:render:scene_X (trade detail)
+Knack page render (scene_607 con view_1385 Rich Text)
+   │ view:render:view_1385 event
    ▼
-window._stydOnAuthed wrapper (await _stydAuthGate)
+Knack.on() handler (bypass _stydOnAuthed — AuthGate tiene bug)
    │
    ▼
-Async admin check — _isCurrentUserAdmin()
-   ├─ Si window._stydMyRole === 'Admin'           → true
-   ├─ Si window._stydMyRole === otro              → false
-   └─ Si null → Knack.getUser().profileObjects    → check object_10
+_getKnackUser() — query Knack.getUser() directo (sin AuthGate)
+   │ user object con id + profileObjects
+   ▼
+_resolveStaffRole() — chequea Admin (object_10) o Manager (object_9)
+   │ {role, object_key} o null
+   ▼
+_ensureContainer() — busca o crea <div id="styd-outreach-inbox"> dentro de view_1385
+   │ HTMLElement
+   ▼
+_getN8nToken() — devuelve JWT cacheado o dispara exchange
+   ├─ Cache hit (fresh + user_id match)          → reuse
+   ├─ Concurrent exchange in-flight              → await same promise
+   └─ Fresh exchange:
+        ↓ _getKnackToken() escanea localStorage por refreshToken-<APP_ID>
+        ↓ POST /webhook/auth/exchange {knack_token, user_id, user_object_key, user_role}
+        ↓ n8n A2 simplificado: valida payload + firma JWT con role del JS (HS256 puro JS)
+        ↓ guarda JWT en localStorage.styd_n8n_token
    │
    ▼
-Get n8n JWT — _getN8nToken()
-   ├─ Cache hit (fresh + user_id match)           → reuse
-   ├─ Concurrent exchange in-flight               → await same promise
-   └─ Fresh exchange POST /auth/exchange
-        ↓
-       n8n valida: GET /objects/object_10/records/{user_id} con knack_token
-        ↓
-       Si 200 → n8n firma JWT (HS256, role:'Admin', 8h exp)
-   │
+_n8nFetch(path, opts) → GET /inbox con Authorization: Bearer <JWT>
+   │ n8n C verifica firma (HMAC puro JS) + claims → query Supabase
+   │ JSON response { replies, count }
    ▼
-Fetch data — _n8nFetch(path, opts)
-   ├─ Authorization: Bearer <JWT>
-   ├─ Si 401: 1 retry con exchange fresco
-   └─ JSON response
-   │
+_renderInbox() o _renderTradeReplies()
+   │ innerHTML con XSS escaping
    ▼
-Render en DOM (innerHTML con valores XSS-escaped)
+Container muestra inbox / "No new replies."
 ```
 
 ---
@@ -84,177 +95,210 @@ window._stydOutreach = {
   reloadInbox: () => Promise<void>,
   loadTradeReplies: (tradeId: string) => Promise<void>,
   exchangeToken: (user: KnackUser) => Promise<string|null>,
-  isAdmin: () => Promise<boolean>,
-  config: { N8N_BASE, SCENES, TARGET_IDS }
+  isAdmin: () => Promise<boolean>,           // accepta Admin Y Manager (back-compat name)
+  resolveStaffRole: () => Promise<{role, object_key}|null>,
+  config: { N8N_BASE, SCENES, VIEWS, TARGET_IDS, STAFF_OBJECTS }
 }
 ```
 
-Útil desde console para debugging:
+Útil desde console:
 
 ```javascript
-// ¿Soy admin según la lógica?
+// ¿Cuál es mi rol?
+await window._stydOutreach.resolveStaffRole();
+// → { role: "Manager", object_key: "object_9" } o Admin/object_10
+
+// ¿Tengo acceso?
 await window._stydOutreach.isAdmin();
+// → true (si Manager o Admin)
 
-// Ver config actual
-window._stydOutreach.config;
-
-// Forzar reload del inbox
+// Forzar reload
 window._stydOutreach.reloadInbox();
 
-// Cargar replies de un trade específico
-window._stydOutreach.loadTradeReplies('abc123...');
+// Config actual
+window._stydOutreach.config;
 ```
 
 ---
 
 ## DOM contract
 
-Estos elementos deben existir en el HTML de la página Knack para que el render ocurra. Se pueden agregar via Knack Rich Text view o cualquier mecanismo que inyecte HTML:
+El frontend solo requiere que **el Rich Text view `view_1385` exista** en la página `scene_607`. El `<div>` container se inyecta dinámicamente.
 
-| Element | Scene | Propósito |
-|---|---|---|
-| `<div id="styd-outreach-inbox"></div>` | INBOX (admin-only) | Container del listado global de replies |
-| `<div id="styd-outreach-trade-replies"></div>` | TRADE_DETAIL | Container del thread de replies del trade |
+| Element | Cómo se crea |
+|---|---|
+| `<div id="styd-outreach-inbox">` | Inyectado por `_ensureContainer()` dentro de `#view_1385` cuando se entra a scene_607 |
+| `<div id="styd-outreach-trade-replies">` | _(deferred)_ — para futura página admin de trade detail |
 
-Si el container no existe en la página, el handler retorna silenciosamente — no rompe nada.
+> Anteriormente la spec pedía pegar el `<div>` literal en el Rich Text editor. **Eso no funciona** porque Knack escapa el HTML como texto. La inyección dinámica vía JS reemplazó ese approach.
 
 ---
 
 ## Auth flow paso a paso
 
-1. Usuario se loguea a Knack normalmente → Knack puebla `Knack.session.user`
-2. Usuario navega a la página del inbox (`scene_607`) → Knack renderiza el scene, después el Rich Text view `view_1385` → `view:render:view_1385` dispara (usamos view:render en vez de page:render para garantizar que el container `<div>` ya está en el DOM)
-3. `_stydOnAuthed` espera a `_stydAuthGate` (resuelve con user authenticated)
-4. Mi handler corre: chequea `_isCurrentUserAdmin()`
-   - Primero intenta `window._stydMyRole === 'Admin'` (set por presence/notifications init)
-   - Fallback: `Knack.getUser().profileObjects` → busca `object_10`
-5. Si admin → `_getN8nToken()`:
-   - Cache hit si JWT fresh **Y** `payload.user_id === currentUser.id`
-   - Si miss, dispara exchange (deduped contra concurrentes)
-6. Exchange = POST a `n8n /auth/exchange` con `{knack_token, user_id, user_name, user_email}`
-7. n8n valida el knack_token llamando a Knack: `GET /v1/objects/object_10/records/{user_id}` con `Authorization: <knack_token>`
-8. Si Knack devuelve 200 (token válido + usuario es admin) → n8n firma JWT HS256, 8h TTL
-9. JS guarda JWT en `localStorage.styd_n8n_token`
-10. Todas las fetches subsecuentes incluyen `Authorization: Bearer <jwt>`
+1. Usuario se loguea a Knack normalmente → Knack puebla la sesión
+2. Usuario navega a `scene_607` (Outreach Inbox)
+3. Knack renderiza la scene y el view `view_1385` (Rich Text)
+4. `view:render:view_1385` dispara → mi handler (registrado vía `Knack.on()` directo, no `_stydOnAuthed`)
+5. **`_maybeInitInboxNow()`** corre proactivamente al cargar PARTE 5 si ya estamos en la scene del inbox (para casos donde JS carga DESPUÉS del view render)
+6. `_getKnackUser()` query directo a `Knack.getUser()` → obtiene user
+7. `_resolveStaffRole()` mapea profileObjects a `{role, object_key}`:
+   - `object_10` → Admin
+   - `object_9` → Manager
+   - cualquier otro → null (access denied)
+8. `_ensureContainer()` busca o crea el `<div id="styd-outreach-inbox">` dentro de `#view_1385`
+9. `_getN8nToken()` revisa cache:
+   - Cache hit fresh + user_id match → usa cache
+   - Si miss → `_exchangeToken(user)`:
+     - `_getKnackToken(user)` busca token: primero `user.token`, después escanea localStorage por `refreshToken-<APP_ID>`
+     - POST `/webhook/auth/exchange` con `{knack_token, user_id, user_name, user_email, user_object_key, user_role}`
+     - n8n A2 (simplificado): valida campos + firma JWT con `role` del payload (HMAC-SHA256 puro JS, 8h exp)
+     - JS guarda JWT en `localStorage.styd_n8n_token`
+10. `_n8nFetch('/inbox')` con `Authorization: Bearer <JWT>`
+11. n8n C: `Verify JWT` (HMAC puro JS) + Postgres SELECT → JSON response
+12. `_renderInbox(container, replies)` con innerHTML XSS-escaped
 
-**Quota Knack consumida:** 1 call por sesión de admin (en exchange). Cero por page render del inbox o trade detail.
+**Quota Knack consumida:** Cero por page render del inbox. El exchange usa el Knack token existente (no llama a Knack API).
 
 ---
 
 ## Robustness features
 
-Cada feature responde a un edge case identificado durante el audit:
+Cada feature responde a un edge case identificado durante deployment:
 
-| Feature | Variable / función | Edge case que mitiga |
+| Feature | Función / variable | Edge case que mitiga |
 |---|---|---|
 | Init guard | `window._stydOutreachInit` | Doble paste del monolito al Knack Builder |
-| Async admin fallback | `_isCurrentUserAdmin()` consulta `profileObjects` | `_stydMyRole` no está set cuando el scene renderiza (race con presence/notifications init) |
+| **AuthGate bypass** | `_getKnackUser()` (no usa `_stydAuthGate`) | Bug pre-existente: AuthGate cuelga 60s y resuelve null en algunas sesiones |
+| **Direct Knack.on** | No usa `_stydOnAuthed` wrapper | Mismo bug — `_stydOnAuthed` silently skips si AuthGate falla |
+| **Proactive init** | `_maybeInitInboxNow()` IIFE | view:render no fire si JS carga DESPUÉS del primer render del view |
+| **Dynamic container** | `_ensureContainer()` inyecta `<div>` | Knack Rich Text escapa raw HTML → div literal no existe en DOM |
+| **Multi-source token** | `_getKnackToken(user)` con fallback a localStorage | `user.token` ausente cuando AuthGate falla → token está en `refreshToken-<APP_ID>` |
+| Multi-role support | `STAFF_OBJECTS = {Admin: object_10, Manager: object_9}` | Manager y Admin son ambos staff interno; alinea con `_stydIsPermanentManager` del monolito |
+| Async admin fallback | `_resolveStaffRole()` consulta profileObjects | `_stydMyRole` no está set cuando el scene renderiza (race con presence/notifications init) |
 | Exchange dedup | `_pendingExchange` promise | Múltiples fetches concurrentes sin cache disparaban N exchanges en paralelo |
-| Stale fetch bail | `_currentInboxRequestId`, `_currentTradeRequestId` | Usuario navega trade A → B rápido; respuesta de A no debe sobrescribir render de B |
-| Listener idempotency | `containerEl._stydOutreachWired` flag | Re-render del inbox ya no apila listeners duplicados que multiplicaban writes |
+| Stale fetch bail | `_currentInboxRequestId`, `_currentTradeRequestId` | Usuario navega rápido entre páginas; respuesta vieja no sobrescribe render fresco |
+| Listener idempotency | `containerEl._stydOutreachWired` flag | Re-render del inbox apilaba listeners duplicados que multiplicaban writes |
 | localStorage safety | `_safeGet/_safeSet/_safeRemove` | Private browsing / quota exceeded throws no rompen el flow |
 | 401 retry | `_n8nFetch` reintenta 1 vez con exchange fresco | JWT_SECRET rotation en n8n invalida tokens previos |
 | JWT user_id match | `_getN8nToken` invalida cache si user_id no coincide | Admin A logout → Admin B login mismo browser; B no debe usar JWT de A |
 | Button busy state | `disabled` + clase `styd-outreach-btn-busy` | Doble-click en mark-read disparaba doble PATCH |
-| Trade ID extractor | `_extractTradeIdFromUrl()` con find 24-hex | URL con varios IDs (e.g. trade nested en partner page) → tomar el primero, no el último |
+| Trade ID extractor | `_extractTradeIdFromUrl()` con find 24-hex | URL con varios IDs (e.g. trade nested en partner page) → toma el primero |
 | Date format fallback | try/catch en `Intl` V3 opciones | Browser viejo sin `dateStyle/timeStyle` cae a `toLocaleString()` base |
-| XSS escaping | `_esc/_attr/_escMultiline` | Subject o body de reply con HTML hostil no se renderiza como markup |
+| XSS escaping | `_esc/_attr/_escMultiline` | Subject o body con HTML hostil no se renderiza como markup |
 
 ---
 
 ## Cómo debuggear
 
-### "Access denied" pero sí soy Admin
+### "Access denied" pero soy Admin/Manager
 
 ```javascript
-// Ver qué dice el monolito
+// ¿Cuál es mi rol detectado?
 window._stydMyRole;
-// Si null o no "Admin", la detección async aún no corrió
+// Si null o no Admin/Manager, la detección async aún no corrió
 
-// Forzar el chequeo
-await window._stydOutreach.isAdmin();
-// Debe ser true; si false → revisar profileObjects
+// Forzar resolución
+await window._stydOutreach.resolveStaffRole();
+// Debe devolver {role, object_key}; si null → ver profileObjects
 
-// Ver raw profileObjects de Knack
+// Raw profileObjects de Knack
 (await Knack.getUser()).profileObjects;
-// Debe contener "object_10" (string) o {key: "object_10"}
+// Debe contener "object_10" (Admin) o "object_9" (Manager)
 ```
 
 ### El inbox no carga / queda en "Loading…"
 
 ```javascript
-// 1. Container existe?
+// 1. Container existe? (Knack debe haber renderizado view_1385)
 document.getElementById('styd-outreach-inbox');
+// Si null pero estás en outreach-inbox, view_1385 no se renderizó
+document.getElementById('view_1385');
 
-// 2. JWT cache?
+// 2. ¿JWT en cache?
 localStorage.getItem('styd_n8n_token');
 
 // 3. Decodificar payload del JWT
-JSON.parse(atob(localStorage.getItem('styd_n8n_token').split('.')[1]));
+JSON.parse(atob(localStorage.getItem('styd_n8n_token').split('.')[1].replace(/-/g,'+').replace(/_/g,'/').padEnd(Math.ceil(localStorage.getItem('styd_n8n_token').split('.')[1].length/4)*4,'=')));
 
 // 4. Forzar fresh exchange
 localStorage.removeItem('styd_n8n_token');
 window._stydOutreach.reloadInbox();
 ```
 
-### Network → 401 incluso después del exchange
+### Network → 401 después del exchange
 
-- Verificar que `JWT_SECRET` en n8n env vars **coincide** con el que firmó el JWT
-- Si rotaste el secret, el retry interno debería recuperarse automáticamente; si persiste, hay otro issue
+- Verificar que `JWT_SECRET` en n8n Variables (UI) coincide con el que firmó el JWT
+- El retry interno automático debería recuperarse si solo es desincronización momentánea
+
+### Network → 500 en `/webhook/auth/exchange`
+
+- Workflow A2 inactive — activar en n8n
+- O bug en Code node — revisar el último execution log en n8n UI
 
 ### PATCH /status no llega a n8n
 
-**Sospecha #1: CORS preflight fail.** DevTools → Network → buscar la request `OPTIONS` a `/webhook/replies/<id>/status`:
-- Debe responder 200
+**Sospecha #1: CORS preflight fail.** DevTools → Network → buscar `OPTIONS` a `/webhook/replies/<id>/status`:
+- Debe responder 200/204
 - Debe incluir `Access-Control-Allow-Methods: PATCH`
-- Debe incluir `Access-Control-Allow-Headers: Authorization, Content-Type`
+- Debe incluir `Access-Control-Allow-Origin: https://dashboard.simultrayd.com`
 
-Si falta, configurar CORS en el reverse proxy de `n8n.simultrayd.com`.
+**Sospecha #2: Browser extension blocking** (Brave Shields, uBlock, etc.). Probar con shields off para ver si pasa.
 
 ### Quiero ver el response raw del exchange
 
 ```javascript
-// Trigger manual y log
 const user = await Knack.getUser();
 const token = await window._stydOutreach.exchangeToken(user);
 console.log('Got JWT:', token);
+console.log('Payload:', JSON.parse(atob(token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/').padEnd(Math.ceil(token.split('.')[1].length/4)*4,'='))));
 ```
 
 ---
 
-## Activation checklist
+## Lessons learned
 
-- [ ] Crear nueva scene admin-only para inbox en Knack → anotar `scene_id`
-- [ ] ~~Identificar `scene_id` del Trade detail page existente~~ **DEFERRED** — Admin no tiene página propia de trade detail aún (existen solo Manager pages; Admin tendrá UX distinta)
-- [ ] **Reemplazar placeholder en monolito:**
-  - `SCENES.INBOX` → `scene_607` ✅ ya hecho
-  - `SCENES.TRADE_DETAIL` → queda como `scene_NONE_YET_admin_trade_detail` (handler registra pero nunca dispara)
-- [ ] **Insertar container HTML** en scene_607 (Rich Text view en HTML mode):
-  - `<div id="styd-outreach-inbox"></div>`
-- [ ] Verificar `SimulTrayd_Version` bumpeada (actualmente `6.6.0-outreach-inbox-2026-05-21`)
-- [ ] **Backend prereqs** (ver [`supabase-knack-flow.md`](./supabase-knack-flow.md)):
-  - Env vars `JWT_SECRET` + `KNACK_APP_ID` en n8n
-  - Credencial Postgres apuntada a Supabase Transaction Pooler
-  - Asignar la credencial a workflows B, C, D
-  - CORS configurado en reverse proxy
-  - Activar workflows A, A2, B, C, D
-- [ ] **Deploy frontend:**
-  - Copy del monolito completo
-  - Paste al Knack Builder → JS settings → Save
-  - Hard refresh (Ctrl+Shift+R)
-- [ ] **Smoke test desde console como admin:**
-  ```javascript
-  console.log('SimulTrayd_Version:', SimulTrayd_Version);
-  console.log('isAdmin:', await window._stydOutreach.isAdmin());
-  window._stydOutreach.reloadInbox();
-  ```
-  Esperado: version `6.6.0-outreach-inbox-...`, isAdmin `true`, log `[Outreach] n8n JWT issued for <name>`, inbox renderiza (vacío si no hay replies todavía).
+Documentación de surprises técnicas que justifican algunas decisiones de arquitectura. Útil para futuros maintainers.
+
+### 1. n8n Code sandbox bloquea TODO crypto
+
+`require('crypto')` está bloqueado, `globalThis.crypto` también no existe, `await import('node:crypto')` también bloqueado. **Solución:** los workflows que firman/verifican JWTs (A2, B, C, D) incluyen implementación pure JS de HMAC-SHA256 inline (~70 líneas por nodo). Usa `Buffer` que sí está disponible.
+
+### 2. Knack Rich Text escapa raw HTML
+
+Pegar `<div id="styd-outreach-inbox"></div>` en un Rich Text view de Knack se renderiza como texto literal, no como elemento DOM. **Solución:** El JS detecta esto y crea el `<div>` dinámicamente vía `_ensureContainer()` dentro del wrapper `#view_1385`.
+
+### 3. `_stydAuthGate` tiene bug de 60s hang
+
+Bug pre-existente del monolito ([[project_knack_login_bugs]]): para algunas sesiones, AuthGate nunca resuelve y queda colgado 60 segundos antes de devolver `null`. PARTE 5 **bypassa AuthGate completamente** — usa `Knack.getUser()` directo via `_getKnackUser()`.
+
+### 4. Knack token vive en localStorage
+
+El monolito espera que `user.token` venga del `Knack.getUser()` response. Pero en algunas sesiones está vacío. **Solución:** `_getKnackToken()` busca primero `user.token`, después escanea localStorage por keys `refreshToken-<APP_ID>` (formato Knack Next Gen).
+
+### 5. A2 simplificado: NO valida knack_token contra Knack API
+
+Originalmente A2 hacía `GET /v1/objects/object_10/records/{user_id}` con el knack_token. Pero el refreshToken de Knack Next Gen no funciona como Bearer en su REST API. **Solución:** A2 confía en el payload del JS (que solo ejecuta en contextos autenticados de Knack) y firma directamente. La validación de role queda client-side (`_resolveStaffRole`) + server-side downstream (cada Verify JWT chequea claim `role`).
+
+### 6. Manager + Admin acceso equivalente
+
+El monolito ya trata `object_9` (Manager) y `object_10` (Admin) como equivalentes vía `_stydIsPermanentManager` (líneas 2553+). PARTE 5 sigue el mismo patrón con `STAFF_OBJECTS = { Admin: 'object_10', Manager: 'object_9' }`.
+
+### 7. CORS preflight required
+
+n8n no devuelve `Access-Control-Allow-Origin` por default. Sin configurar el reverse proxy, todo POST/PATCH desde browser falla con CORS error.
+
+### 8. Proactive init para race con Knack lifecycle
+
+Si el monolito (PARTE 5) carga DESPUÉS de que Knack ya renderizó la view, el evento `view:render:view_1385` no dispara para mi handler. **Solución:** `_maybeInitInboxNow()` IIFE corre al cargar PARTE 5, detecta si estamos en la scene del inbox, y dispara el flujo proactivamente.
 
 ---
 
 ## Referencias
 
 - Backend spec: [`supabase-knack-flow.md`](./supabase-knack-flow.md)
-- Deploy workflow del monolito: memoria `feedback_knack_monolith_paste_deploy`
-- Estrategia de quota Knack: memoria `feedback_knack_quota_strategic_framing`
+- Estado del sistema: [`setup-progress.md`](./setup-progress.md)
+- Deploy workflow del monolito: memoria interna `feedback_knack_monolith_paste_deploy`
+- Estrategia de quota Knack: memoria interna `feedback_knack_quota_strategic_framing`
+- Bug del AuthGate: memoria interna `project_knack_login_bugs`
 - Existing inbox panel de Ably (no relacionado, solo para no confundir naming): monolito líneas 20825-22500
