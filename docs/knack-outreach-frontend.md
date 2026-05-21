@@ -28,7 +28,7 @@ Integración frontend del módulo de Outreach Inbox en la app de Knack. Renderiz
 | Archivo | `knack/Simultrayd_NextGen.js` |
 | Sección | `PARTE 5 — OUTREACH INBOX` (al final del archivo) |
 | Línea inicial | ~26135 |
-| Versión | `6.6.0-outreach-inbox-2026-05-21` |
+| Versión | `6.6.1-outreach-inbox-view1385-2026-05-21` |
 | Deploy | Paste manual al Knack Builder JS settings + hard refresh |
 
 ---
@@ -45,7 +45,7 @@ Por eso PARTE 5 sigue la misma convención que PARTE 1-4: bloque IIFE al final d
 
 ```
 Knack page render (con <div id="styd-outreach-..."></div>)
-   │ page:render:scene_X event
+   │ view:render:view_X event (inbox) / page:render:scene_X (trade detail)
    ▼
 window._stydOnAuthed wrapper (await _stydAuthGate)
    │
@@ -123,7 +123,7 @@ Si el container no existe en la página, el handler retorna silenciosamente — 
 ## Auth flow paso a paso
 
 1. Usuario se loguea a Knack normalmente → Knack puebla `Knack.session.user`
-2. Usuario navega a la página del inbox → `page:render:scene_INBOX` dispara
+2. Usuario navega a la página del inbox (`scene_607`) → Knack renderiza el scene, después el Rich Text view `view_1385` → `view:render:view_1385` dispara (usamos view:render en vez de page:render para garantizar que el container `<div>` ya está en el DOM)
 3. `_stydOnAuthed` espera a `_stydAuthGate` (resuelve con user authenticated)
 4. Mi handler corre: chequea `_isCurrentUserAdmin()`
    - Primero intenta `window._stydMyRole === 'Admin'` (set por presence/notifications init)
@@ -225,13 +225,12 @@ console.log('Got JWT:', token);
 ## Activation checklist
 
 - [ ] Crear nueva scene admin-only para inbox en Knack → anotar `scene_id`
-- [ ] Identificar `scene_id` del Trade detail page existente
-- [ ] **Reemplazar placeholders en monolito:**
-  - `SCENES.INBOX: 'scene_TBD_INBOX'` → el id real
-  - `SCENES.TRADE_DETAIL: 'scene_TBD_TRADE'` → el id real
-- [ ] **Insertar containers HTML** en las páginas (Rich Text view, hidden HTML, etc.):
-  - Inbox scene: `<div id="styd-outreach-inbox"></div>`
-  - Trade detail: `<div id="styd-outreach-trade-replies"></div>`
+- [ ] ~~Identificar `scene_id` del Trade detail page existente~~ **DEFERRED** — Admin no tiene página propia de trade detail aún (existen solo Manager pages; Admin tendrá UX distinta)
+- [ ] **Reemplazar placeholder en monolito:**
+  - `SCENES.INBOX` → `scene_607` ✅ ya hecho
+  - `SCENES.TRADE_DETAIL` → queda como `scene_NONE_YET_admin_trade_detail` (handler registra pero nunca dispara)
+- [ ] **Insertar container HTML** en scene_607 (Rich Text view en HTML mode):
+  - `<div id="styd-outreach-inbox"></div>`
 - [ ] Verificar `SimulTrayd_Version` bumpeada (actualmente `6.6.0-outreach-inbox-2026-05-21`)
 - [ ] **Backend prereqs** (ver [`supabase-knack-flow.md`](./supabase-knack-flow.md)):
   - Env vars `JWT_SECRET` + `KNACK_APP_ID` en n8n
