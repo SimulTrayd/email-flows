@@ -28,7 +28,7 @@ Integración frontend del módulo de Outreach Inbox en la app de Knack. Renderiz
 | Archivo | `knack/Simultrayd_NextGen.js` |
 | Sección | `PARTE 5 — OUTREACH INBOX` (al final del archivo) |
 | Línea inicial | ~26135 |
-| Versión actual | `6.6.7-outreach-token-from-localstorage-2026-05-21` |
+| Versión actual | `6.6.9-outreach-static-status-path-2026-05-21` |
 | Deploy | Paste manual al Knack Builder JS settings + hard refresh |
 
 ---
@@ -41,7 +41,7 @@ Integración frontend del módulo de Outreach Inbox en la app de Knack. Renderiz
 |---|---|
 | Scene Outreach Inbox | `scene_607` (child de Admin Dashboard `scene_603`) |
 | Rich Text view del inbox | `view_1385` — container `<div>` se inyecta dinámicamente |
-| Versión deployed | `6.6.7-outreach-token-from-localstorage-2026-05-21` |
+| Versión deployed | `6.6.9-outreach-static-status-path-2026-05-21` |
 | Trade detail UI | _(deferred)_ — no existe page admin de trade detail aún |
 
 Para detalle por componente ver [`setup-progress.md`](./setup-progress.md).
@@ -291,6 +291,14 @@ n8n no devuelve `Access-Control-Allow-Origin` por default. Sin configurar el rev
 ### 8. Proactive init para race con Knack lifecycle
 
 Si el monolito (PARTE 5) carga DESPUÉS de que Knack ya renderizó la view, el evento `view:render:view_1385` no dispara para mi handler. **Solución:** `_maybeInitInboxNow()` IIFE corre al cargar PARTE 5, detecta si estamos en la scene del inbox, y dispara el flujo proactivamente.
+
+### 9. n8n CORS no maneja webhook paths con parámetros dinámicos
+
+`/webhook/replies/:id/status` (path con `:id`) fallaba en el preflight OPTIONS porque n8n no devolvía los headers CORS para esos paths. `/webhook/auth/exchange` e `/inbox` (estáticos) sí funcionan. **Solución:** D usa path estático `/webhook/replies-status` con `id` en el body del POST.
+
+### 10. CORS Allow-Methods limitado a OPTIONS + POST
+
+El reverse proxy advertise solo `OPTIONS, POST` en `Access-Control-Allow-Methods`. PATCH preflight fallaba. **Solución:** D usa POST en lugar de PATCH. Menos REST, mismo resultado.
 
 ---
 

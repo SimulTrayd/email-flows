@@ -2,13 +2,19 @@
 
 Estado del sistema Outreach Inbox: Instantly → Supabase → n8n → Knack.
 
-> Última actualización: 2026-05-21
+> Última actualización: 2026-05-21 (smoke tests pasados + webhook Instantly probado)
 
 ---
 
 ## Resumen
 
-End-to-end **funcional** para el flujo Supabase → Knack (inbox vacío renderiza correctamente). Falta solo configurar Instantly Dashboard + insertar data real para validar el render con replies.
+**Sistema end-to-end OPERATIVO.** Todos los flujos críticos testeados:
+- ✅ Auth Knack → JWT n8n
+- ✅ Listar inbox (5 dummy replies + 1 test Instantly renderizan)
+- ✅ Mark read / replied / archive (status persiste en Supabase)
+- ✅ Webhook Instantly → Supabase (testeado con curl synthetic)
+
+Falta solo: configurar webhook real en Instantly Dashboard (Hector en el proceso) + activar #1/#2 cuando haya CSV de Knack.
 
 ```
 Instantly (campañas outreach) ⏳ pendiente
@@ -30,17 +36,17 @@ Knack UI (custom JS en monolito, version 6.6.7) ✅
 | Componente | Status | Detalle |
 |---|---|---|
 | Supabase schema | ✅ DEPLOYED | `outreach_queue` + `email_replies` con RLS, índices, triggers |
-| n8n workflows | ✅ 4 active, 4 inactive | Ver tabla abajo |
+| n8n workflows | ✅ 5 active, 3 inactive | Ver tabla abajo |
 | Postgres credential | ✅ ASSIGNED | 8 nodos Postgres conectados via Transaction Pooler |
-| n8n Variables (UI) | ✅ 3/4 | JWT_SECRET, KNACK_APP_ID, INSTANTLY_API_KEY · falta INSTANTLY_CAMPAIGN_ID |
-| CORS reverse proxy | ✅ CONFIGURED | Allow origin `https://dashboard.simultrayd.com` |
-| Frontend monolito | ✅ DEPLOYED | PARTE 5 en `Simultrayd_NextGen.js`, version `6.6.7-outreach-token-from-localstorage-2026-05-21` |
+| n8n Variables (UI) | ✅ 4/4 | JWT_SECRET, KNACK_APP_ID, INSTANTLY_API_KEY, INSTANTLY_CAMPAIGN_ID |
+| CORS reverse proxy | ✅ CONFIGURED | Allow origin `https://dashboard.simultrayd.com`, methods OPTIONS+POST |
+| Frontend monolito | ✅ DEPLOYED | PARTE 5 en `Simultrayd_NextGen.js`, version `6.6.9-outreach-static-status-path-2026-05-21` |
 | Knack scene_607 (Outreach Inbox) | ✅ CREATED | Child de Admin Dashboard scene_603 (login + role gate) |
 | Knack view_1385 (Rich Text container) | ✅ CREATED | Container `<div>` se inyecta dinámicamente vía JS |
-| Smoke test end-to-end | ✅ PASA | Inbox renderiza "No new replies." correctamente |
-| Instantly Dashboard webhook | ❌ PENDIENTE | Apuntar a `/webhook/instantly-reply` |
-| INSTANTLY_CAMPAIGN_ID | ❌ PENDIENTE | Definir con equipo después de crear campaña |
-| CSV de Knack | ❌ PENDIENTE | Export manual desde Knack Builder |
+| Smoke test end-to-end | ✅ PASA | Auth + Inbox + Status update + Webhook ingest todos validados |
+| Instantly Dashboard webhook | 🟡 EN PROCESO | Webhook agregado para campaña TEST HH (Hector finalizando config) |
+| INSTANTLY_CAMPAIGN_ID | ✅ SET | `8e1da705-eb9d-4c5f-8c13-c8dfc8ea479a` (campaña TEST HH) |
+| CSV de Knack | ❌ PENDIENTE | Export manual desde Knack Builder cuando haya outreach activo |
 
 ---
 
@@ -53,18 +59,18 @@ Host: `https://n8n.simultrayd.com`
 | # | Nombre | ID | Endpoint | Active | Notas |
 |---|---|---|---|---|---|
 | A | Auth Login (fallback) | `t51xq2zgY0np1eQx` | `POST /webhook/auth/login` | ❌ | Email+password fallback, no usado en producción |
-| **A2** | **Auth Exchange** | `SC2iFF8nnECCIWQH` | `POST /webhook/auth/exchange` | ✅ | Path de producción — recibe knack_token, firma JWT |
+| **A2** | **Auth Exchange** | `SC2iFF8nnECCIWQH` | `POST /webhook/auth/exchange` | ✅ | Path de producción — recibe knack_token, firma JWT (HMAC pure JS) |
 | **B** | **GET Replies by Trade** | `0hvF00Q1bniPu5fl` | `GET /webhook/replies?trade_id=X` | ✅ | Para futura vista de trade detail |
 | **C** | **GET Inbox (Global)** | `kmhDhz3lTowr8LkN` | `GET /webhook/inbox` | ✅ | Inbox global admin/manager |
-| **D** | **PATCH Reply Status** | `7YL2aZZRz2eZk0TO` | `PATCH /webhook/replies/:id/status` | ✅ | Mark read/replied/archived |
+| **D** | **POST Reply Status** | `7YL2aZZRz2eZk0TO` | `POST /webhook/replies-status` (body: `{id, status}`) | ✅ | Mark read/replied/archived. Path estático para CORS |
 
 ### Outreach lifecycle (Instantly ↔ n8n ↔ Supabase)
 
 | # | Nombre | ID | Trigger | Active | Notas |
 |---|---|---|---|---|---|
-| #1 | CSV Import → outreach_queue | `LWLC1gxUUrTOVUqC` | Form Upload | ❌ | Esperando CSV de Knack |
-| #2 | Daily Push outreach_queue → Instantly | `Y248GBppVAfkSoBx` | Cron diario 14:00 UTC | ❌ | NO activar hasta tener INSTANTLY_CAMPAIGN_ID |
-| #3 | Instantly Reply Webhook → email_replies | `MfRAUFc7KwGsMdqz` | Webhook | ❌ | Activar + configurar URL en Instantly Dashboard |
+| #1 | CSV Import → outreach_queue | `LWLC1gxUUrTOVUqC` | Form Upload | ❌ | Esperando CSV de Knack — `/form/outreach-csv-upload` |
+| #2 | Daily Push outreach_queue → Instantly | `Y248GBppVAfkSoBx` | Cron diario 14:00 UTC | ❌ | Listo para activar (INSTANTLY_CAMPAIGN_ID configurado) |
+| #3 | Instantly Reply Webhook → email_replies | `MfRAUFc7KwGsMdqz` | Webhook | ✅ | **Activo y testeado** (curl synthetic insertó row correctamente, incluyendo custom_variables) |
 
 ---
 
@@ -75,8 +81,8 @@ Host: `https://n8n.simultrayd.com`
 ```
 JWT_SECRET             = ya+hHglpJ2B7OWdgMa9murEqRUuA6y8n4MWRLNCHf6zQEXUO8S+dF1n+cEzYw4l3
 KNACK_APP_ID           = 64d6ba88d3ca8200285f80ae
-INSTANTLY_API_KEY      = <Instantly Dashboard → Settings → Integrations → API>
-INSTANTLY_CAMPAIGN_ID  = ⏳ pendiente — UUID del campaign cuando se cree
+INSTANTLY_API_KEY      = (configurado por Hector)
+INSTANTLY_CAMPAIGN_ID  = 8e1da705-eb9d-4c5f-8c13-c8dfc8ea479a   (campaña "TEST HH")
 ```
 
 > Los workflows leen estas variables via `$vars.X` (n8n Variables UI, no env vars del runtime).
@@ -157,7 +163,19 @@ El monolito ya trata Manager (`object_9`) y Admin (`object_10`) como equivalente
 
 Sin configuración, OPTIONS preflight devolvía 500 y bloqueaba el POST real. Se configuró en el reverse proxy.
 
-### 8. Brave Shields puede bloquear fetches cross-subdomain
+### 7b. n8n CORS solo funciona para webhook paths estáticos
+
+Descubierto cuando D usaba `/replies/:id/status` (dinámico). n8n NO devuelve los headers CORS en preflight para paths con parámetros. **Solución:** D fue migrado a path estático `/replies-status` con el id en el body.
+
+### 7c. Reverse proxy CORS solo advertise OPTIONS+POST en Allow-Methods
+
+PATCH preflight fallaba aunque el path fuera estático. **Solución:** D usa POST (no PATCH). Semánticamente menos REST, prácticamente funciona.
+
+### 8. n8n Code sandbox bloquea TODO crypto
+
+`require('crypto')` ❌ + `globalThis.crypto` ❌ + `await import('node:crypto')` ❌. **Solución:** HMAC-SHA256 puro JS inline en A2/B/C/D (~70 líneas usando `Buffer`).
+
+### 9. Brave Shields puede bloquear fetches cross-subdomain
 
 Brave bloqueó la primera tanda de fetches a `n8n.simultrayd.com` desde `dashboard.simultrayd.com`. Se resolvió bajando shields para el dominio (no es solución general — usuarios finales no deberían enfrentar esto).
 
@@ -169,7 +187,7 @@ Desde browser console logueado como Admin/Manager en Knack, en la página `outre
 
 ```javascript
 console.log('Version:', SimulTrayd_Version);
-// Esperado: "6.6.7-outreach-token-from-localstorage-2026-05-21"
+// Esperado: "6.6.9-outreach-static-status-path-2026-05-21"
 
 await window._stydOutreach.resolveStaffRole();
 // Esperado: { role: "Manager", object_key: "object_9" } o { role: "Admin", object_key: "object_10" }

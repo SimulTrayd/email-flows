@@ -18,7 +18,7 @@ Spec del backend del sistema Outreach Inbox: workflows n8n + schema Supabase.
 | **A2** | **Auth Exchange (prod path)** | `SC2iFF8nnECCIWQH` | `POST /webhook/auth/exchange` | ✅ |
 | **B** | **GET Replies by Trade** | `0hvF00Q1bniPu5fl` | `GET /webhook/replies?trade_id=X` | ✅ |
 | **C** | **GET Inbox (Global)** | `kmhDhz3lTowr8LkN` | `GET /webhook/inbox` | ✅ |
-| **D** | **PATCH Reply Status** | `7YL2aZZRz2eZk0TO` | `PATCH /webhook/replies/:id/status` | ✅ |
+| **D** | **POST Reply Status** | `7YL2aZZRz2eZk0TO` | `POST /webhook/replies-status` (body `{id, status}`) | ✅ |
 
 **Outreach lifecycle Instantly ↔ n8n ↔ Supabase:**
 
@@ -26,9 +26,9 @@ Spec del backend del sistema Outreach Inbox: workflows n8n + schema Supabase.
 |---|---|---|---|---|
 | #1 | CSV Import → outreach_queue | `LWLC1gxUUrTOVUqC` | Form Upload | ❌ |
 | #2 | Daily Push outreach_queue → Instantly | `Y248GBppVAfkSoBx` | Cron diario 14:00 UTC | ❌ |
-| #3 | Instantly Reply Webhook → email_replies | `MfRAUFc7KwGsMdqz` | Webhook POST | ❌ |
+| #3 | Instantly Reply Webhook → email_replies | `MfRAUFc7KwGsMdqz` | Webhook POST | ✅ |
 
-**Frontend code:** Trade-Platform monolito `knack/Simultrayd_NextGen.js` → PARTE 5. Versión actual `6.6.7-outreach-token-from-localstorage-2026-05-21`. Deploy = paste al Knack Builder — ver [[feedback_knack_monolith_paste_deploy]] en memory.
+**Frontend code:** Trade-Platform monolito `knack/Simultrayd_NextGen.js` → PARTE 5. Versión actual `6.6.9-outreach-static-status-path-2026-05-21`. Deploy = paste al Knack Builder — ver [[feedback_knack_monolith_paste_deploy]] en memory.
 
 **Supabase project:** `pfmnqetthotzpeticfko` · región `us-west-1` · Postgres 17
 **Migration aplicado:** `outreach_initial_schema` (2026-05-20)
